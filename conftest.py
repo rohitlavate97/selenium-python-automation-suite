@@ -1,10 +1,15 @@
 import pytest
 import subprocess
+
 from core.driver_factory import DriverFactory
 from utils.config_reader import ConfigReader
 from utils.cleanup_util import CleanupUtil
 from utils.email_util import EmailUtil
 from utils.slack_util import SlackUtil
+from utils.screenshot_util import ScreenshotUtil
+from utils.page_source_util import PageSourceUtil
+from utils.browser_log_util import BrowserLogUtil
+
 
 # ----------------------------
 # CLI OPTIONS
@@ -23,6 +28,7 @@ def pytest_addoption(parser):
         help="Browser name (chrome / firefox / edge)"
     )
 
+
 # ----------------------------
 # FIXTURES FOR CLI OPTIONS
 # ----------------------------
@@ -30,9 +36,11 @@ def pytest_addoption(parser):
 def env(request):
     return request.config.getoption("--env")
 
+
 @pytest.fixture(scope="session")
 def browser(request):
     return request.config.getoption("--browser")
+
 
 # ----------------------------
 # CLEANUP BEFORE TESTS START
@@ -41,6 +49,7 @@ def pytest_sessionstart(session):
     print("📢 Pytest session started")
     print("🧹 Cleaning old artifacts before test run...")
     CleanupUtil.clean_all()
+
 
 # ----------------------------
 # WEBDRIVER SETUP / TEARDOWN
@@ -68,6 +77,25 @@ def setup(request, browser):
     yield
     DriverFactory.quit_driver()
 
+
+# ----------------------------
+# AUTO CAPTURE ON FAILURE
+# ----------------------------
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+
+    if rep.when == "call" and rep.failed:
+        try:
+            ScreenshotUtil.attach_to_allure()
+            PageSourceUtil.attach_to_allure()
+            BrowserLogUtil.attach_console_logs()
+            print("📸 Screenshot + 🧾 Page Source + 🧠 Console Logs attached")
+        except Exception as e:
+            print("❌ Failure capture error:", e)
+
+
 # ----------------------------
 # AFTER ALL TESTS FINISH
 # ----------------------------
@@ -93,26 +121,30 @@ def pytest_sessionfinish(session, exitstatus):
     # ---------------------------
     # Email Notification
     # ---------------------------
-    subject = "Automation Execution Completed"
-    body = "<h2>Test Execution Finished</h2>"
+    try:
+        subject = "Automation Execution Completed"
+        body = "<h2>Test Execution Finished</h2>"
 
-    EmailUtil.send_email(
-        subject=subject,
-        body=body,
-        sender=config["EMAIL"]["FROM"],
-        password=config["EMAIL"]["PASSWORD"],
-        recipients=config["EMAIL"]["TO"],
-        attachments=["allure-report/index.html"]
-    )
-
-    print("📧 Email sent successfully")
+        EmailUtil.send_email(
+            subject=subject,
+            body=body,
+            sender=config["EMAIL"]["FROM"],
+            password=config["EMAIL"]["PASSWORD"],
+            recipients=config["EMAIL"]["TO"],
+            attachments=["allure-report/index.html"]
+        )
+        print("📧 Email sent successfully")
+    except Exception as e:
+        print("❌ Email sending failed:", e)
 
     # ---------------------------
     # Slack Notification
     # ---------------------------
-    SlackUtil.send_message(
-        webhook_url="YOUR_WEBHOOK_URL",
-        message="🚀 Automation Execution Completed. Allure report generated!"
-    )
-
-    print("💬 Slack message sent")
+    try:
+        SlackUtil.send_message(
+            webhook_url="YOUR_WEBHOOK_URL",
+            message="🚀 Automation Execution Completed. Allure report generated!"
+        )
+        print("💬 Slack message sent")
+    except Exception as e:
+        print("❌ Slack notification failed:", e)
