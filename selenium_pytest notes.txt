@@ -514,8 +514,18 @@ import os
 import uuid
 from threading import local
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 _thread_ctx = local()
+
+
+class MaskingFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        for secret in ["password", "pwd", "secret", "token"]:
+            msg = msg.replace(secret, "****")
+        record.msg = msg
+        return True
 
 
 class LogUtil:
@@ -527,6 +537,9 @@ class LogUtil:
         _thread_ctx.test_name = test_name
         _thread_ctx.env = env
         _thread_ctx.browser = browser
+
+        # Per-test log file
+        _thread_ctx.log_file = f"logs/test_{correlation_id}.log"
         return correlation_id
 
     @staticmethod
@@ -550,14 +563,26 @@ class LogUtil:
                 "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
             )
 
-            fh = logging.FileHandler("logs/automation.log")
-            fh.setFormatter(formatter)
+            # Combined log
+            combined = RotatingFileHandler(
+                "logs/automation.log", maxBytes=5_000_000, backupCount=5
+            )
+            combined.setFormatter(formatter)
+            combined.addFilter(MaskingFilter())
 
-            ch = logging.StreamHandler()
-            ch.setFormatter(formatter)
+            # Per-test log
+            per_test_file = getattr(_thread_ctx, "log_file", "logs/default.log")
+            per_test = logging.FileHandler(per_test_file)
+            per_test.setFormatter(formatter)
+            per_test.addFilter(MaskingFilter())
 
-            logger.addHandler(fh)
-            logger.addHandler(ch)
+            # Console
+            console = logging.StreamHandler()
+            console.setFormatter(formatter)
+
+            logger.addHandler(combined)
+            logger.addHandler(per_test)
+            logger.addHandler(console)
 
         return logger
 
@@ -578,6 +603,42 @@ class LogUtil:
         with open("logs/structured.json", "a", encoding="utf-8") as f:
             f.write(json.dumps(payload) + "\n")
 
+
+#api_log_util.py
+import allure
+from utils.log_util import LogUtil
+
+
+class ApiLogUtil:
+
+    @staticmethod
+    def log_request(method, url, headers=None, body=None):
+        logger = LogUtil.get_logger("API")
+        logger.info(f"API REQUEST: {method} {url}")
+        LogUtil.log_json("API request", extra={
+            "method": method,
+            "url": url
+        })
+
+        allure.attach(
+            f"{method} {url}\nHeaders: {headers}\nBody: {body}",
+            name="API Request",
+            attachment_type=allure.attachment_type.TEXT
+        )
+
+    @staticmethod
+    def log_response(status, body):
+        logger = LogUtil.get_logger("API")
+        logger.info(f"API RESPONSE: {status}")
+        LogUtil.log_json("API response", extra={
+            "status": status
+        })
+
+        allure.attach(
+            str(body),
+            name="API Response",
+            attachment_type=allure.attachment_type.JSON
+        )
 
 
 
@@ -823,6 +884,7 @@ class BrowserLogUtil:
 import pytest
 import subprocess
 import os
+import json
 import allure
 
 from core.driver_factory import DriverFactory
@@ -855,7 +917,7 @@ def browser(request):
 
 
 # ----------------------------
-# CLEANUP
+# CLEANUP BEFORE SESSION
 # ----------------------------
 def pytest_sessionstart(session):
     print("🧹 Cleaning old artifacts...")
@@ -881,7 +943,7 @@ def test_context(request, env, browser):
 
 
 # ----------------------------
-# DRIVER SETUP
+# DRIVER SETUP / TEARDOWN
 # ----------------------------
 @pytest.fixture(scope="function", autouse=True)
 def setup(request, browser):
@@ -910,19 +972,30 @@ def pytest_runtest_makereport(item, call):
 
     if rep.when == "call" and rep.failed:
         try:
+            # Attach UI artifacts
             ScreenshotUtil.attach_to_allure()
             PageSourceUtil.attach_to_allure()
             BrowserLogUtil.attach_console_logs()
 
+            # Attach structured logs
             if os.path.exists("logs/structured.json"):
-                with open("logs/structured.json", "r") as f:
+                with open("logs/structured.json", "r", encoding="utf-8") as f:
                     allure.attach(
                         f.read(),
                         name="Structured Logs",
                         attachment_type=allure.attachment_type.JSON
                     )
 
+            # Attach test context
+            context = LogUtil.get_context()
+            allure.attach(
+                json.dumps(context, indent=2),
+                name="Test Context",
+                attachment_type=allure.attachment_type.JSON
+            )
+
             print("📎 Failure artifacts attached")
+
         except Exception as e:
             print("❌ Failure hook error:", e)
 
@@ -931,8 +1004,13 @@ def pytest_runtest_makereport(item, call):
 # SESSION FINISH
 # ----------------------------
 def pytest_sessionfinish(session, exitstatus):
+    print("📢 Pytest session finished")
+
     config = ConfigReader.load("qa")
 
+    # ---------------------------
+    # Generate Allure Report
+    # ---------------------------
     try:
         subprocess.run(
             ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
@@ -941,8 +1019,11 @@ def pytest_sessionfinish(session, exitstatus):
         )
         print("✅ Allure report generated")
     except Exception as e:
-        print("❌ Allure failed:", e)
+        print("❌ Allure generation failed:", e)
 
+    # ---------------------------
+    # Email Notification
+    # ---------------------------
     try:
         EmailUtil.send_email(
             subject="Automation Execution Completed",
@@ -956,6 +1037,9 @@ def pytest_sessionfinish(session, exitstatus):
     except Exception as e:
         print("❌ Email failed:", e)
 
+    # ---------------------------
+    # Slack Notification
+    # ---------------------------
     try:
         SlackUtil.send_message(
             webhook_url="YOUR_WEBHOOK_URL",

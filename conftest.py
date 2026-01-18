@@ -1,6 +1,7 @@
 import pytest
 import subprocess
 import os
+import json
 import allure
 
 from core.driver_factory import DriverFactory
@@ -33,7 +34,7 @@ def browser(request):
 
 
 # ----------------------------
-# CLEANUP
+# CLEANUP BEFORE SESSION
 # ----------------------------
 def pytest_sessionstart(session):
     print("🧹 Cleaning old artifacts...")
@@ -59,7 +60,7 @@ def test_context(request, env, browser):
 
 
 # ----------------------------
-# DRIVER SETUP
+# DRIVER SETUP / TEARDOWN
 # ----------------------------
 @pytest.fixture(scope="function", autouse=True)
 def setup(request, browser):
@@ -88,19 +89,30 @@ def pytest_runtest_makereport(item, call):
 
     if rep.when == "call" and rep.failed:
         try:
+            # Attach UI artifacts
             ScreenshotUtil.attach_to_allure()
             PageSourceUtil.attach_to_allure()
             BrowserLogUtil.attach_console_logs()
 
+            # Attach structured logs
             if os.path.exists("logs/structured.json"):
-                with open("logs/structured.json", "r") as f:
+                with open("logs/structured.json", "r", encoding="utf-8") as f:
                     allure.attach(
                         f.read(),
                         name="Structured Logs",
                         attachment_type=allure.attachment_type.JSON
                     )
 
+            # Attach test context
+            context = LogUtil.get_context()
+            allure.attach(
+                json.dumps(context, indent=2),
+                name="Test Context",
+                attachment_type=allure.attachment_type.JSON
+            )
+
             print("📎 Failure artifacts attached")
+
         except Exception as e:
             print("❌ Failure hook error:", e)
 
@@ -109,8 +121,13 @@ def pytest_runtest_makereport(item, call):
 # SESSION FINISH
 # ----------------------------
 def pytest_sessionfinish(session, exitstatus):
+    print("📢 Pytest session finished")
+
     config = ConfigReader.load("qa")
 
+    # ---------------------------
+    # Generate Allure Report
+    # ---------------------------
     try:
         subprocess.run(
             ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
@@ -119,8 +136,11 @@ def pytest_sessionfinish(session, exitstatus):
         )
         print("✅ Allure report generated")
     except Exception as e:
-        print("❌ Allure failed:", e)
+        print("❌ Allure generation failed:", e)
 
+    # ---------------------------
+    # Email Notification
+    # ---------------------------
     try:
         EmailUtil.send_email(
             subject="Automation Execution Completed",
@@ -134,6 +154,9 @@ def pytest_sessionfinish(session, exitstatus):
     except Exception as e:
         print("❌ Email failed:", e)
 
+    # ---------------------------
+    # Slack Notification
+    # ---------------------------
     try:
         SlackUtil.send_message(
             webhook_url="YOUR_WEBHOOK_URL",

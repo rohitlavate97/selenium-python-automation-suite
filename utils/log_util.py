@@ -4,8 +4,18 @@ import os
 import uuid
 from threading import local
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 _thread_ctx = local()
+
+
+class MaskingFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        for secret in ["password", "pwd", "secret", "token"]:
+            msg = msg.replace(secret, "****")
+        record.msg = msg
+        return True
 
 
 class LogUtil:
@@ -17,6 +27,9 @@ class LogUtil:
         _thread_ctx.test_name = test_name
         _thread_ctx.env = env
         _thread_ctx.browser = browser
+
+        # Per-test log file
+        _thread_ctx.log_file = f"logs/test_{correlation_id}.log"
         return correlation_id
 
     @staticmethod
@@ -40,14 +53,26 @@ class LogUtil:
                 "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
             )
 
-            fh = logging.FileHandler("logs/automation.log")
-            fh.setFormatter(formatter)
+            # Combined log
+            combined = RotatingFileHandler(
+                "logs/automation.log", maxBytes=5_000_000, backupCount=5
+            )
+            combined.setFormatter(formatter)
+            combined.addFilter(MaskingFilter())
 
-            ch = logging.StreamHandler()
-            ch.setFormatter(formatter)
+            # Per-test log
+            per_test_file = getattr(_thread_ctx, "log_file", "logs/default.log")
+            per_test = logging.FileHandler(per_test_file)
+            per_test.setFormatter(formatter)
+            per_test.addFilter(MaskingFilter())
 
-            logger.addHandler(fh)
-            logger.addHandler(ch)
+            # Console
+            console = logging.StreamHandler()
+            console.setFormatter(formatter)
+
+            logger.addHandler(combined)
+            logger.addHandler(per_test)
+            logger.addHandler(console)
 
         return logger
 
