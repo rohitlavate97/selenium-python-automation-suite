@@ -1,0 +1,764 @@
+selenium-python-framework/
+│
+├── config/
+│   ├── qa.yaml
+│   ├── uat.yaml
+│   └── prod.yaml
+│
+├── core/
+│   ├── driver_factory.py
+│   ├── base_test.py
+│   └── framework_constants.py
+│
+├── pages/
+│   ├── base_page.py
+│   └── login_page.py
+│
+├── utils/
+│   ├── config_reader.py
+│   ├── selenium_utils.py
+│   ├── wait_utils.py
+│   ├── screenshot_util.py
+│   ├── excel_util.py
+│   ├── email_util.py
+│   ├── log_util.py
+│   └── cleanup_util.py
+│
+├── listeners/
+│   └── pytest_hooks.py
+│
+├── tests/
+│   └── test_login.py
+│
+├── logs/
+├── reports/
+├── screenshots/
+│
+├── docker-compose.yml
+├── Jenkinsfile
+├── pytest.ini
+├── requirements.txt
+└── README.md
+
+
+#requirements.txt
+selenium
+pytest
+pytest-xdist
+pytest-rerunfailures
+allure-pytest
+webdriver-manager
+pyyaml
+openpyxl
+requests
+
+
+
+
+#framework_constants.py
+EXPLICIT_WAIT = 15
+SCREENSHOT_PATH = "screenshots/"
+LOG_PATH = "logs/"
+
+
+#qa.yaml
+URL: "https://online.actitime.com/mstar/login.do"
+BROWSER: "chrome"
+GRID: false
+GRID_URL: "http://localhost:4444/wd/hub"
+HEADLESS: false
+IMPLICIT_TIMEOUT: 10
+
+EMAIL:
+  FROM: "your@gmail.com"
+  PASSWORD: "app-password"
+  TO: ["a@gmail.com", "b@gmail.com"]
+  SMTP_HOST: "smtp.gmail.com"
+  SMTP_PORT: 587
+
+
+#prod.yaml
+URL: "https://online.actitime.com/mstar/login.do"
+BROWSER: "edge"
+GRID: true
+GRID_URL: "http://localhost:4444/wd/hub"
+HEADLESS: true
+IMPLICIT_TIMEOUT: 10
+
+
+#uat.yaml
+URL: "https://online.actitime.com/mstar/login.do"
+BROWSER: "firefox"
+GRID: false
+GRID_URL: "http://localhost:4444/wd/hub"
+HEADLESS: false
+IMPLICIT_TIMEOUT: 10
+
+
+#base_test.py
+import pytest
+from core.driver_factory import DriverFactory
+from utils.config_reader import ConfigReader
+
+@pytest.fixture(scope="function", autouse=True)
+def setup(request):
+    env = request.config.getoption("--env")
+    browser = request.config.getoption("--browser")
+
+    config = ConfigReader.load(env)
+
+    driver = DriverFactory.init_driver(
+        browser=browser,
+        headless=config["HEADLESS"],
+        grid=config["GRID"],
+        grid_url=config["GRID_URL"]
+    )
+
+    driver.get(config["URL"])
+    yield
+    DriverFactory.quit_driver()
+	
+
+#driver_factory
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from selenium.webdriver.edge.service import Service as EdgeService
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.firefox import GeckoDriverManager
+from webdriver_manager.microsoft import EdgeChromiumDriverManager
+from threading import local
+
+_driver = local()
+
+class DriverFactory:
+
+    @staticmethod
+    def init_driver(
+            browser="chrome",
+            headless=False,
+            grid=False,
+            grid_url=None
+    ):
+        if grid:
+            options = Options()
+            if headless:
+                options.add_argument("--headless")
+            _driver.instance = webdriver.Remote(
+                command_executor=grid_url,
+                options=options
+            )
+        else:
+            if browser == "chrome":
+                options = Options()
+                if headless:
+                    options.add_argument("--headless")
+                service = Service(ChromeDriverManager().install())
+                _driver.instance = webdriver.Chrome(
+                    service=service,
+                    options=options
+                )
+
+            elif browser == "firefox":
+                options = FirefoxOptions()
+                if headless:
+                    options.add_argument("-headless")
+                service = FirefoxService(GeckoDriverManager().install())
+                _driver.instance = webdriver.Firefox(
+                    service=service,
+                    options=options
+                )
+
+            elif browser == "edge":
+                options = EdgeOptions()
+                if headless:
+                    options.add_argument("--headless")
+                service = EdgeService(EdgeChromiumDriverManager().install())
+                _driver.instance = webdriver.Edge(
+                    service=service,
+                    options=options
+                )
+
+        _driver.instance.maximize_window()
+        return _driver.instance
+
+    @staticmethod
+    def get_driver():
+        return _driver.instance
+
+    @staticmethod
+    def quit_driver():
+        if hasattr(_driver, "instance"):
+            _driver.instance.quit()
+            del _driver.instance
+
+
+# core/framework_constants.py
+
+EXPLICIT_WAIT = 15
+IMPLICIT_WAIT = 10
+
+SCREENSHOT_PATH = "screenshots/"
+LOG_PATH = "logs/"
+VIDEO_PATH = "videos/"
+
+
+#data/data.xlsx
+
+
+#pytest_hooks.py
+import pytest
+import subprocess
+from utils.email_util import EmailUtil
+from utils.config_reader import ConfigReader
+from utils.slack_util import SlackUtil
+from utils.video_util import VideoUtil
+from utils.cleanup_util import CleanupUtil
+
+
+# ---------------------------
+# CLEANUP BEFORE TESTS START
+# ---------------------------
+def pytest_sessionstart(session):
+    print("🧹 Cleaning old artifacts before test run...")
+    CleanupUtil.clean_all()
+
+
+# ---------------------------
+# AFTER ALL TESTS FINISH
+# ---------------------------
+def pytest_sessionfinish(session, exitstatus):
+    # Load config
+    config = ConfigReader.load("qa")
+
+    # ---------------------------
+    # Generate Allure HTML Report
+    # ---------------------------
+    try:
+        subprocess.run(
+            ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
+            check=True,
+            shell=True
+        )
+        print("Allure HTML report generated successfully.")
+    except Exception as e:
+        print("Failed to generate Allure report:", e)
+
+    # ---------------------------
+    # Email Notification
+    # ---------------------------
+    subject = "Automation Execution Completed"
+    body = "<h2>Test Execution Finished</h2>"
+
+    EmailUtil.send_email(
+        subject=subject,
+        body=body,
+        sender=config["EMAIL"]["FROM"],
+        password=config["EMAIL"]["PASSWORD"],
+        recipients=config["EMAIL"]["TO"],
+        attachments=["allure-report/index.html"]
+    )
+
+    # ---------------------------
+    # Slack Notification
+    # ---------------------------
+    SlackUtil.send_message(
+        webhook_url="YOUR_WEBHOOK_URL",
+        message="🚀 Automation Execution Completed. Allure report generated!"
+    )
+
+
+#base_page.py
+from core.driver_factory import DriverFactory
+
+class BasePage:
+    def __init__(self):
+        self.driver = DriverFactory.get_driver()
+
+
+#login_page.py
+from selenium.webdriver.common.by import By
+from utils.selenium_utils import SeleniumUtil
+from pages.base_page import BasePage
+
+class LoginPage(BasePage):
+
+    username = (By.XPATH, "//input[@id='username']")
+    password = (By.XPATH, "//input[@name='pwd']")
+    login_btn = (By.XPATH, "//div[text()='Login ']")
+
+    def login(self, user, pwd):
+        SeleniumUtil.type(self.driver.find_element(*self.username), user)
+        SeleniumUtil.type(self.driver.find_element(*self.password), pwd)
+        SeleniumUtil.click(self.driver.find_element(*self.login_btn))
+
+
+#test_login_excel.py
+import pytest
+from pages.login_page import LoginPage
+from utils.excel_util import ExcelUtil
+
+data = ExcelUtil.get_test_data("ValidLogin")
+
+@pytest.mark.parametrize("username,password,expected_title", data)
+def test_login_excel(username, password, expected_title):
+    login = LoginPage()
+    login.login(username, password)
+
+    assert expected_title in login.driver.title
+
+
+
+#cleanup_utilimport shutil
+import os
+
+class CleanupUtil:
+
+    @staticmethod
+    def clean_dir(path):
+        if os.path.exists(path):
+            print(f"🧹 Deleting folder: {path}")
+            shutil.rmtree(path)
+            os.makedirs(path)
+            print(f"✅ Recreated folder: {path}")
+        else:
+            print(f"ℹ️ Folder not found (skipped): {path}")
+
+    @staticmethod
+    def clean_all():
+        print("🚀 Starting cleanup before test run...")
+        for folder in ["logs", "screenshots", "reports", "allure-results", "allure-report"]:
+            CleanupUtil.clean_dir(folder)
+        print("🎉 Cleanup completed!")
+
+
+
+#conifg_reader
+import yaml
+
+class ConfigReader:
+
+    _config = None
+
+    @staticmethod
+    def load(env):
+        with open(f"config/{env}.yaml") as f:
+            ConfigReader._config = yaml.safe_load(f)
+        return ConfigReader._config   # ✅ THIS IS THE FIX
+
+    @staticmethod
+    def get(key):
+        if ConfigReader._config is None:
+            raise Exception("Config not loaded. Call ConfigReader.load(env) first.")
+        return ConfigReader._config.get(key)
+
+
+
+#email_util.py
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import os
+
+class EmailUtil:
+
+    @staticmethod
+    def send_email(subject, body, sender, password, recipients, attachments=None):
+        msg = MIMEMultipart()
+        msg["From"] = sender
+        msg["To"] = ",".join(recipients)
+        msg["Subject"] = subject
+
+        msg.attach(MIMEText(body, "html"))
+
+        if attachments:
+            for file in attachments:
+                if os.path.exists(file):
+                    part = MIMEBase("application", "octet-stream")
+                    with open(file, "rb") as f:
+                        part.set_payload(f.read())
+                    encoders.encode_base64(part)
+                    part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(file)}")
+                    msg.attach(part)
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender, password)
+        server.send_message(msg)
+        server.quit()
+		
+
+#excel_util.py
+from openpyxl import load_workbook
+import os
+
+class ExcelUtil:
+
+    @staticmethod
+    def get_test_data(sheet):
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        excel_path = os.path.join(project_root, "data", "data.xlsx")
+
+        print("Using Excel file:", excel_path)
+
+        if not os.path.exists(excel_path):
+            raise FileNotFoundError(f"Excel file not found at {excel_path}")
+
+        wb = load_workbook(excel_path)
+        ws = wb[sheet]
+
+        data = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            data.append(row)
+        return data
+
+
+
+
+#log_util.py
+import logging
+import os
+
+class LogUtil:
+
+    @staticmethod
+    def get_logger(name):
+        os.makedirs("logs", exist_ok=True)
+
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.INFO)
+
+        if not logger.handlers:
+            fh = logging.FileHandler("logs/automation.log")
+            formatter = logging.Formatter(
+                "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+            )
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+
+        return logger
+
+
+
+#screenshot_util
+import os
+import allure
+from datetime import datetime
+from selenium.webdriver.common.by import By
+from core.driver_factory import DriverFactory
+
+class ScreenshotUtil:
+
+    @staticmethod
+    def capture(name="screenshot"):
+        driver = DriverFactory.get_driver()
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        path = f"screenshots/{name}_{timestamp}.png"
+
+        os.makedirs("screenshots", exist_ok=True)
+        driver.save_screenshot(path)
+        return path
+
+    @staticmethod
+    def attach_to_allure():
+        driver = DriverFactory.get_driver()
+        png = driver.get_screenshot_as_png()
+        allure.attach(png, name="Failure Screenshot",
+                      attachment_type=allure.attachment_type.PNG)
+
+
+
+#selenium_util.py
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from core.driver_factory import DriverFactory
+from core.framework_constants import EXPLICIT_WAIT
+
+class SeleniumUtil:
+
+    @staticmethod
+    def click(element):
+        WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
+            .until(EC.element_to_be_clickable(element)).click()
+
+    @staticmethod
+    def type(element, text):
+        WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
+            .until(EC.visibility_of(element))
+        element.clear()
+        element.send_keys(text)
+
+    @staticmethod
+    def get_text(element):
+        return WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
+            .until(EC.visibility_of(element)).text
+
+
+#slack_util
+import requests
+
+class SlackUtil:
+
+    @staticmethod
+    def send_message(webhook_url, message):
+        payload = {"text": message}
+        requests.post(webhook_url, json=payload)
+
+
+#video_util
+import subprocess
+import os
+
+class VideoUtil:
+    process = None
+
+    @staticmethod
+    def start_recording(name):
+        os.makedirs("videos", exist_ok=True)
+        file = f"videos/{name}.mp4"
+        VideoUtil.process = subprocess.Popen([
+            "ffmpeg",
+            "-y",
+            "-f", "gdigrab",
+            "-i", "desktop",
+            file
+        ])
+        return file
+
+    @staticmethod
+    def stop_recording():
+        if VideoUtil.process:
+            VideoUtil.process.terminate()
+
+
+#wait_util.py
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from core.driver_factory import DriverFactory
+from core.framework_constants import EXPLICIT_WAIT
+
+class WaitUtil:
+
+    @staticmethod
+    def wait_for_visible(locator):
+        return WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
+            .until(EC.visibility_of_element_located(locator))
+
+    @staticmethod
+    def wait_for_clickable(locator):
+        return WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
+            .until(EC.element_to_be_clickable(locator))
+
+
+
+#conftest.py
+import pytest
+import subprocess
+from core.driver_factory import DriverFactory
+from utils.config_reader import ConfigReader
+from utils.cleanup_util import CleanupUtil
+from utils.email_util import EmailUtil
+from utils.slack_util import SlackUtil
+
+# ----------------------------
+# CLI OPTIONS
+# ----------------------------
+def pytest_addoption(parser):
+    parser.addoption(
+        "--env",
+        action="store",
+        default="qa",
+        help="Environment name (qa / uat / prod)"
+    )
+    parser.addoption(
+        "--browser",
+        action="store",
+        default="chrome",
+        help="Browser name (chrome / firefox / edge)"
+    )
+
+# ----------------------------
+# FIXTURES FOR CLI OPTIONS
+# ----------------------------
+@pytest.fixture(scope="session")
+def env(request):
+    return request.config.getoption("--env")
+
+@pytest.fixture(scope="session")
+def browser(request):
+    return request.config.getoption("--browser")
+
+# ----------------------------
+# CLEANUP BEFORE TESTS START
+# ----------------------------
+def pytest_sessionstart(session):
+    print("📢 Pytest session started")
+    print("🧹 Cleaning old artifacts before test run...")
+    CleanupUtil.clean_all()
+
+# ----------------------------
+# WEBDRIVER SETUP / TEARDOWN
+# ----------------------------
+@pytest.fixture(scope="function", autouse=True)
+def setup(request, browser):
+    """
+    This fixture:
+    1. Runs BEFORE every test
+    2. Loads env config
+    3. Opens the application
+    4. Quits WebDriver AFTER test
+    """
+    env_name = request.config.getoption("--env")
+    config = ConfigReader.load(env_name)
+
+    driver = DriverFactory.init_driver(
+        browser=browser,
+        headless=config["HEADLESS"],
+        grid=config["GRID"],
+        grid_url=config["GRID_URL"]
+    )
+
+    driver.get(config["URL"])
+    yield
+    DriverFactory.quit_driver()
+
+# ----------------------------
+# AFTER ALL TESTS FINISH
+# ----------------------------
+def pytest_sessionfinish(session, exitstatus):
+    print("📢 Pytest session finished")
+
+    # Load config
+    config = ConfigReader.load("qa")
+
+    # ---------------------------
+    # Generate Allure HTML Report
+    # ---------------------------
+    try:
+        subprocess.run(
+            ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
+            check=True,
+            shell=True
+        )
+        print("✅ Allure HTML report generated successfully.")
+    except Exception as e:
+        print("❌ Failed to generate Allure report:", e)
+
+    # ---------------------------
+    # Email Notification
+    # ---------------------------
+    subject = "Automation Execution Completed"
+    body = "<h2>Test Execution Finished</h2>"
+
+    EmailUtil.send_email(
+        subject=subject,
+        body=body,
+        sender=config["EMAIL"]["FROM"],
+        password=config["EMAIL"]["PASSWORD"],
+        recipients=config["EMAIL"]["TO"],
+        attachments=["allure-report/index.html"]
+    )
+
+    print("📧 Email sent successfully")
+
+    # ---------------------------
+    # Slack Notification
+    # ---------------------------
+    SlackUtil.send_message(
+        webhook_url="YOUR_WEBHOOK_URL",
+        message="🚀 Automation Execution Completed. Allure report generated!"
+    )
+
+    print("💬 Slack message sent")
+
+
+
+#docker-compose.yml
+version: "3"
+services:
+  selenium-hub:
+    image: selenium/hub:4.19.1
+    ports:
+      - "4444:4444"
+
+  chrome:
+    image: selenium/node-chrome:4.19.1
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      - SE_EVENT_BUS_HOST=selenium-hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+
+  firefox:
+    image: selenium/node-firefox:4.19.1
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      - SE_EVENT_BUS_HOST=selenium-hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+
+  edge:
+    image: selenium/node-edge:4.19.1
+    shm_size: 2gb
+    depends_on:
+      - selenium-hub
+    environment:
+      - SE_EVENT_BUS_HOST=selenium-hub
+      - SE_EVENT_BUS_PUBLISH_PORT=4442
+      - SE_EVENT_BUS_SUBSCRIBE_PORT=4443
+
+
+#JenkinsFile
+pipeline {
+    agent any
+
+    stages {
+        stage('Install') {
+            steps {
+                sh 'pip install -r requirements.txt'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh 'pytest -n 3 --env=qa'
+            }
+        }
+
+        stage('Allure') {
+            steps {
+                sh 'allure generate allure-results -o allure-report --clean'
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: '**/screenshots/*.png'
+            archiveArtifacts artifacts: '**/logs/*.log'
+        }
+    }
+}
+
+
+#pytest.ini
+[pytest]
+addopts = -v -n 3 --reruns 2 --alluredir=allure-results
+
+;addopts = -v --reruns 2 --alluredir=allure-results
+
+
+
+#run-tests.bat
+python -m pytest -v
+allure generate allure-results -o allure-report --clean
+allure open allure-report
