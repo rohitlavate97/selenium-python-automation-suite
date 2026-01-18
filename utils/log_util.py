@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from threading import local
-from datetime import datetime
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
 _thread_ctx = local()
@@ -28,7 +28,6 @@ class LogUtil:
         _thread_ctx.env = env
         _thread_ctx.browser = browser
 
-        # Per-test log file
         _thread_ctx.log_file = f"logs/test_{correlation_id}.log"
         return correlation_id
 
@@ -53,20 +52,17 @@ class LogUtil:
                 "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
             )
 
-            # Combined log
             combined = RotatingFileHandler(
                 "logs/automation.log", maxBytes=5_000_000, backupCount=5
             )
             combined.setFormatter(formatter)
             combined.addFilter(MaskingFilter())
 
-            # Per-test log
             per_test_file = getattr(_thread_ctx, "log_file", "logs/default.log")
             per_test = logging.FileHandler(per_test_file)
             per_test.setFormatter(formatter)
             per_test.addFilter(MaskingFilter())
 
-            # Console
             console = logging.StreamHandler()
             console.setFormatter(formatter)
 
@@ -81,7 +77,7 @@ class LogUtil:
         os.makedirs("logs", exist_ok=True)
 
         payload = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": level,
             "message": message,
             **LogUtil.get_context()

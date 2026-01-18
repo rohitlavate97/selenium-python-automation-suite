@@ -13,6 +13,13 @@ from utils.screenshot_util import ScreenshotUtil
 from utils.page_source_util import PageSourceUtil
 from utils.browser_log_util import BrowserLogUtil
 from utils.log_util import LogUtil
+from utils.page_sync_util import PageSyncUtil
+
+from utils.retry_engine import RetryEngine
+from utils.flaky_tracker import FlakyTracker
+from utils.stability_analyzer import StabilityAnalyzer
+from utils.failure_classifier import FailureClassifier
+from utils.analytics_engine import AnalyticsEngine
 
 
 # ----------------------------
@@ -75,26 +82,72 @@ def setup(request, browser):
     )
 
     driver.get(config["URL"])
+    PageSyncUtil.wait_for_ui_stable(driver)
+
     yield
+
     DriverFactory.quit_driver()
 
 
 # ----------------------------
-# FAILURE HOOK
+# SMART RETRY ENGINE
+# ----------------------------
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    test_name = item.name
+
+    while True:
+        try:
+            RetryEngine.record_attempt(test_name)
+            yield
+            return
+        except Exception as e:
+            if RetryEngine.should_retry(test_name):
+                RetryEngine.attach_retry_info(test_name, e)
+                AnalyticsEngine.record(test_name, "retries", RetryEngine.attempts[test_name])
+                continue
+            else:
+                raise
+
+
+# ----------------------------
+# FAILURE + FLAKY + ANALYTICS
 # ----------------------------
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
 
+    if rep.when == "call":
+        status = "failed" if rep.failed else "passed"
+        FlakyTracker.record(item.name, status)
+
+        history = FlakyTracker.load().get(item.name, [])
+        stability = StabilityAnalyzer.stability_score(history)
+
+        AnalyticsEngine.record(item.name, "stability", stability)
+        allure.dynamic.label("stability", f"{stability}%")
+
+        if FlakyTracker.is_flaky(history):
+            allure.dynamic.label("flaky", "true")
+            allure.attach(
+                f"Stability Score: {stability}%",
+                name="Flakiness Analysis",
+                attachment_type=allure.attachment_type.TEXT
+            )
+
     if rep.when == "call" and rep.failed:
+        exc = call.excinfo.value if call.excinfo else None
+        if exc:
+            category = FailureClassifier.classify(exc)
+            allure.dynamic.label("failure_type", category)
+            AnalyticsEngine.record(item.name, "failure_type", category)
+
         try:
-            # Attach UI artifacts
             ScreenshotUtil.attach_to_allure()
             PageSourceUtil.attach_to_allure()
             BrowserLogUtil.attach_console_logs()
 
-            # Attach structured logs
             if os.path.exists("logs/structured.json"):
                 with open("logs/structured.json", "r", encoding="utf-8") as f:
                     allure.attach(
@@ -103,7 +156,6 @@ def pytest_runtest_makereport(item, call):
                         attachment_type=allure.attachment_type.JSON
                     )
 
-            # Attach test context
             context = LogUtil.get_context()
             allure.attach(
                 json.dumps(context, indent=2),
@@ -123,14 +175,15 @@ def pytest_runtest_makereport(item, call):
 def pytest_sessionfinish(session, exitstatus):
     print("📢 Pytest session finished")
 
-    config = ConfigReader.load("qa")
+    env = session.config.getoption("--env")
+    config = ConfigReader.load(env)
 
     # ---------------------------
-    # Generate Allure Report
+    # Generate Allure Report (Windows-safe)
     # ---------------------------
     try:
         subprocess.run(
-            ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
+            "allure generate allure-results -o allure-report --clean",
             check=True,
             shell=True
         )
@@ -139,29 +192,36 @@ def pytest_sessionfinish(session, exitstatus):
         print("❌ Allure generation failed:", e)
 
     # ---------------------------
-    # Email Notification
+    # Email Notification (Optional)
     # ---------------------------
     try:
-        EmailUtil.send_email(
-            subject="Automation Execution Completed",
-            body="<h2>Execution Finished</h2>",
-            sender=config["EMAIL"]["FROM"],
-            password=config["EMAIL"]["PASSWORD"],
-            recipients=config["EMAIL"]["TO"],
-            attachments=["allure-report/index.html"]
-        )
-        print("📧 Email sent")
+        if "EMAIL" in config and config["EMAIL"].get("FROM") and config["EMAIL"].get("PASSWORD"):
+            EmailUtil.send_email(
+                subject="Automation Execution Completed",
+                body="<h2>Execution Finished</h2>",
+                sender=config["EMAIL"]["FROM"],
+                password=config["EMAIL"]["PASSWORD"],
+                recipients=config["EMAIL"]["TO"],
+                attachments=["allure-report/index.html"]
+            )
+            print("📧 Email sent")
+        else:
+            print("ℹ️ Email skipped (not configured)")
     except Exception as e:
         print("❌ Email failed:", e)
 
     # ---------------------------
-    # Slack Notification
+    # Slack Notification (Optional)
     # ---------------------------
     try:
-        SlackUtil.send_message(
-            webhook_url="YOUR_WEBHOOK_URL",
-            message="🚀 Automation completed. Allure report ready."
-        )
-        print("💬 Slack notified")
+        webhook = "YOUR_WEBHOOK_URL"
+        if webhook.startswith("http"):
+            SlackUtil.send_message(
+                webhook_url=webhook,
+                message="🚀 Automation completed. Allure report ready."
+            )
+            print("💬 Slack notified")
+        else:
+            print("ℹ️ Slack skipped (not configured)")
     except Exception as e:
         print("❌ Slack failed:", e)

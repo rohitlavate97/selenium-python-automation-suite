@@ -9,7 +9,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.firefox import GeckoDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
 from threading import local
+
 from utils.log_util import LogUtil
+from utils.network_tracker import NetworkTracker
 
 _driver = local()
 
@@ -19,6 +21,7 @@ class DriverFactory:
     @staticmethod
     def init_driver(browser="chrome", headless=False, grid=False, grid_url=None):
         logger = LogUtil.get_logger("DriverFactory")
+
         LogUtil.log_json("Initializing driver", extra={
             "browser": browser,
             "headless": headless,
@@ -33,14 +36,14 @@ class DriverFactory:
                     options = Options()
                     if headless:
                         options.add_argument("--headless=new")
-                elif browser == "edge":
-                    options = EdgeOptions()
-                    if headless:
-                        options.add_argument("--headless=new")
                 elif browser == "firefox":
                     options = FirefoxOptions()
                     if headless:
                         options.add_argument("-headless")
+                elif browser == "edge":
+                    options = EdgeOptions()
+                    if headless:
+                        options.add_argument("--headless=new")
                 else:
                     raise Exception(f"Unsupported browser: {browser}")
 
@@ -74,13 +77,19 @@ class DriverFactory:
                     raise Exception(f"Unsupported browser: {browser}")
 
             _driver.instance.maximize_window()
+
+            # ✅ Inject network tracker safely
+            try:
+                NetworkTracker.inject(_driver.instance)
+                logger.info("Network tracker injected successfully")
+            except Exception as e:
+                logger.warning(f"Network tracker injection failed: {e}")
+
             logger.info("Driver initialized successfully")
-            LogUtil.log_json("Driver initialized successfully")
             return _driver.instance
 
         except Exception as e:
             logger.error(f"Driver init failed: {e}")
-            LogUtil.log_json("Driver init failed", level="ERROR", extra={"error": str(e)})
             raise
 
     @staticmethod
@@ -92,13 +101,12 @@ class DriverFactory:
     @staticmethod
     def quit_driver():
         logger = LogUtil.get_logger("DriverFactory")
+
         if hasattr(_driver, "instance"):
             try:
                 _driver.instance.quit()
                 logger.info("Driver quit successfully")
-                LogUtil.log_json("Driver quit successfully")
             except Exception as e:
                 logger.error(f"Driver quit failed: {e}")
-                LogUtil.log_json("Driver quit failed", level="ERROR", extra={"error": str(e)})
             finally:
                 del _driver.instance

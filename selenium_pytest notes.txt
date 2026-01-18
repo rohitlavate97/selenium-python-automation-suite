@@ -131,7 +131,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.firefox import GeckoDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
 from threading import local
+
 from utils.log_util import LogUtil
+from utils.network_tracker import NetworkTracker
 
 _driver = local()
 
@@ -141,6 +143,7 @@ class DriverFactory:
     @staticmethod
     def init_driver(browser="chrome", headless=False, grid=False, grid_url=None):
         logger = LogUtil.get_logger("DriverFactory")
+
         LogUtil.log_json("Initializing driver", extra={
             "browser": browser,
             "headless": headless,
@@ -155,14 +158,17 @@ class DriverFactory:
                     options = Options()
                     if headless:
                         options.add_argument("--headless=new")
-                elif browser == "edge":
-                    options = EdgeOptions()
-                    if headless:
-                        options.add_argument("--headless=new")
+
                 elif browser == "firefox":
                     options = FirefoxOptions()
                     if headless:
                         options.add_argument("-headless")
+
+                elif browser == "edge":
+                    options = EdgeOptions()
+                    if headless:
+                        options.add_argument("--headless=new")
+
                 else:
                     raise Exception(f"Unsupported browser: {browser}")
 
@@ -170,6 +176,7 @@ class DriverFactory:
                     command_executor=grid_url,
                     options=options
                 )
+
             else:
                 if browser == "chrome":
                     options = Options()
@@ -196,8 +203,19 @@ class DriverFactory:
                     raise Exception(f"Unsupported browser: {browser}")
 
             _driver.instance.maximize_window()
+
+            # 🔥 PHASE 2 INTEGRATION: Inject Network Tracker
+            try:
+                NetworkTracker.inject()
+                logger.info("Network tracker injected successfully")
+                LogUtil.log_json("Network tracker injected")
+            except Exception as e:
+                logger.warning(f"Network tracker injection failed: {e}")
+                LogUtil.log_json("Network tracker injection failed", level="WARN", extra={"error": str(e)})
+
             logger.info("Driver initialized successfully")
             LogUtil.log_json("Driver initialized successfully")
+
             return _driver.instance
 
         except Exception as e:
@@ -214,6 +232,7 @@ class DriverFactory:
     @staticmethod
     def quit_driver():
         logger = LogUtil.get_logger("DriverFactory")
+
         if hasattr(_driver, "instance"):
             try:
                 _driver.instance.quit()
@@ -688,9 +707,11 @@ class ScreenshotUtil:
 #selenium_util.py
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
 from core.driver_factory import DriverFactory
 from core.framework_constants import EXPLICIT_WAIT
 from utils.log_util import LogUtil
+from utils.page_sync_util import PageSyncUtil
 
 
 class SeleniumUtil:
@@ -701,9 +722,16 @@ class SeleniumUtil:
         logger.info("Clicking element")
         LogUtil.log_json("Clicking element", extra={"action": "click"})
 
-        WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
-            .until(EC.element_to_be_clickable(element))
+        driver = DriverFactory.get_driver()
+
+        WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.element_to_be_clickable(element)
+        )
+
         element.click()
+
+        # 🔥 Phase 2: Auto UI stability sync
+        PageSyncUtil.wait_for_ui_stable()
 
     @staticmethod
     def type(element, text):
@@ -716,10 +744,17 @@ class SeleniumUtil:
             "value": masked
         })
 
-        WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
-            .until(EC.visibility_of(element))
+        driver = DriverFactory.get_driver()
+
+        WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.visibility_of(element)
+        )
+
         element.clear()
         element.send_keys(text)
+
+        # 🔥 Phase 2: Auto UI stability sync
+        PageSyncUtil.wait_for_ui_stable()
 
     @staticmethod
     def get_text(element):
@@ -727,8 +762,50 @@ class SeleniumUtil:
         logger.info("Fetching element text")
         LogUtil.log_json("Fetching element text", extra={"action": "get_text"})
 
-        return WebDriverWait(DriverFactory.get_driver(), EXPLICIT_WAIT)\
-            .until(EC.visibility_of(element)).text
+        driver = DriverFactory.get_driver()
+
+        text = WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.visibility_of(element)
+        ).text
+
+        # 🔥 Phase 2: Auto UI stability sync
+        PageSyncUtil.wait_for_ui_stable()
+
+        return text
+
+    @staticmethod
+    def wait_for_visible(locator):
+        logger = LogUtil.get_logger("SeleniumUtil")
+        logger.info(f"Waiting for visibility: {locator}")
+        LogUtil.log_json("Waiting for visibility", extra={"locator": str(locator)})
+
+        driver = DriverFactory.get_driver()
+
+        element = WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.visibility_of_element_located(locator)
+        )
+
+        # 🔥 Phase 2: Auto UI stability sync
+        PageSyncUtil.wait_for_ui_stable()
+
+        return element
+
+    @staticmethod
+    def wait_for_clickable(locator):
+        logger = LogUtil.get_logger("SeleniumUtil")
+        logger.info(f"Waiting for clickable: {locator}")
+        LogUtil.log_json("Waiting for clickable", extra={"locator": str(locator)})
+
+        driver = DriverFactory.get_driver()
+
+        element = WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.element_to_be_clickable(locator)
+        )
+
+        # 🔥 Phase 2: Auto UI stability sync
+        PageSyncUtil.wait_for_ui_stable()
+
+        return element
 
 
 #slack_util
@@ -896,6 +973,16 @@ from utils.screenshot_util import ScreenshotUtil
 from utils.page_source_util import PageSourceUtil
 from utils.browser_log_util import BrowserLogUtil
 from utils.log_util import LogUtil
+from utils.page_sync_util import PageSyncUtil
+
+# Phase 1
+from utils.retry_engine import RetryEngine
+from utils.flaky_tracker import FlakyTracker
+from utils.stability_analyzer import StabilityAnalyzer
+
+# Phase 3
+from utils.failure_classifier import FailureClassifier
+from utils.analytics_engine import AnalyticsEngine
 
 
 # ----------------------------
@@ -958,21 +1045,75 @@ def setup(request, browser):
     )
 
     driver.get(config["URL"])
+
+    # Phase 2: Auto UI stability sync
+    PageSyncUtil.wait_for_ui_stable()
+
     yield
+
     DriverFactory.quit_driver()
 
 
 # ----------------------------
-# FAILURE HOOK
+# SMART RETRY ENGINE (Phase 1)
+# ----------------------------
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    test_name = item.name
+
+    while True:
+        try:
+            RetryEngine.record_attempt(test_name)
+            yield
+            return
+        except Exception as e:
+            if RetryEngine.should_retry(test_name):
+                RetryEngine.attach_retry_info(test_name, e)
+                AnalyticsEngine.record(test_name, "retries", RetryEngine.attempts[test_name])
+                continue
+            else:
+                raise
+
+
+# ----------------------------
+# FAILURE + FLAKY + ANALYTICS HOOK
 # ----------------------------
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
 
+    # ---------- Phase 1: Flaky + Stability ----------
+    if rep.when == "call":
+        status = "failed" if rep.failed else "passed"
+        FlakyTracker.record(item.name, status)
+
+        history = FlakyTracker.load().get(item.name, [])
+        stability = StabilityAnalyzer.stability_score(history)
+
+        AnalyticsEngine.record(item.name, "stability", stability)
+
+        allure.dynamic.label("stability", f"{stability}%")
+
+        if FlakyTracker.is_flaky(history):
+            allure.dynamic.label("flaky", "true")
+            allure.attach(
+                f"Stability Score: {stability}%",
+                name="Flakiness Analysis",
+                attachment_type=allure.attachment_type.TEXT
+            )
+
+    # ---------- Phase 3: Failure classification ----------
+    if rep.when == "call" and rep.failed:
+        exc = call.excinfo.value if call.excinfo else None
+        if exc:
+            category = FailureClassifier.classify(exc)
+            allure.dynamic.label("failure_type", category)
+            AnalyticsEngine.record(item.name, "failure_type", category)
+
+    # ---------- Failure artifacts ----------
     if rep.when == "call" and rep.failed:
         try:
-            # Attach UI artifacts
             ScreenshotUtil.attach_to_allure()
             PageSourceUtil.attach_to_allure()
             BrowserLogUtil.attach_console_logs()
@@ -1006,7 +1147,8 @@ def pytest_runtest_makereport(item, call):
 def pytest_sessionfinish(session, exitstatus):
     print("📢 Pytest session finished")
 
-    config = ConfigReader.load("qa")
+    env = session.config.getoption("--env")
+    config = ConfigReader.load(env)
 
     # ---------------------------
     # Generate Allure Report
@@ -1014,31 +1156,31 @@ def pytest_sessionfinish(session, exitstatus):
     try:
         subprocess.run(
             ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
-            check=True,
-            shell=True
+            check=True
         )
         print("✅ Allure report generated")
     except Exception as e:
         print("❌ Allure generation failed:", e)
 
     # ---------------------------
-    # Email Notification
+    # Email Notification (Optional)
     # ---------------------------
     try:
-        EmailUtil.send_email(
-            subject="Automation Execution Completed",
-            body="<h2>Execution Finished</h2>",
-            sender=config["EMAIL"]["FROM"],
-            password=config["EMAIL"]["PASSWORD"],
-            recipients=config["EMAIL"]["TO"],
-            attachments=["allure-report/index.html"]
-        )
-        print("📧 Email sent")
+        if "EMAIL" in config:
+            EmailUtil.send_email(
+                subject="Automation Execution Completed",
+                body="<h2>Execution Finished</h2>",
+                sender=config["EMAIL"]["FROM"],
+                password=config["EMAIL"]["PASSWORD"],
+                recipients=config["EMAIL"]["TO"],
+                attachments=["allure-report/index.html"]
+            )
+            print("📧 Email sent")
     except Exception as e:
         print("❌ Email failed:", e)
 
     # ---------------------------
-    # Slack Notification
+    # Slack Notification (Optional)
     # ---------------------------
     try:
         SlackUtil.send_message(
@@ -1048,6 +1190,207 @@ def pytest_sessionfinish(session, exitstatus):
         print("💬 Slack notified")
     except Exception as e:
         print("❌ Slack failed:", e)
+
+
+
+
+
+#retry_classifier
+from selenium.common.exceptions import (
+    TimeoutException,
+    StaleElementReferenceException,
+    WebDriverException
+)
+
+class RetryClassifier:
+
+    RETRYABLE = (
+        TimeoutException,
+        StaleElementReferenceException,
+        WebDriverException
+    )
+
+    @staticmethod
+    def is_retryable(exception):
+        return isinstance(exception, RetryClassifier.RETRYABLE)
+
+
+#flaky_tracker
+import json
+import os
+
+class FlakyTracker:
+    FILE = "reports/flaky_history.json"
+
+    @staticmethod
+    def load():
+        if os.path.exists(FlakyTracker.FILE):
+            with open(FlakyTracker.FILE) as f:
+                return json.load(f)
+        return {}
+
+    @staticmethod
+    def save(data):
+        os.makedirs("reports", exist_ok=True)
+        with open(FlakyTracker.FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    @staticmethod
+    def record(test_name, status):
+        data = FlakyTracker.load()
+        data.setdefault(test_name, []).append(status)
+        FlakyTracker.save(data)
+
+    @staticmethod
+    def is_flaky(history):
+        return "passed" in history and "failed" in history
+
+
+#network_wait_util
+from selenium.webdriver.support.ui import WebDriverWait
+from core.driver_factory import DriverFactory
+
+class NetworkWaitUtil:
+
+    @staticmethod
+    def wait_for_network_idle(timeout=15):
+        driver = DriverFactory.get_driver()
+
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("""
+                return (window.pendingRequests || 0) === 0;
+            """)
+        )
+
+
+#page_sync_util
+from selenium.webdriver.support.ui import WebDriverWait
+from core.driver_factory import DriverFactory
+
+class PageSyncUtil:
+
+    @staticmethod
+    def wait_for_page_ready(timeout=15):
+        driver = DriverFactory.get_driver()
+
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return (window.pendingRequests || 0) === 0")
+        )
+
+class StabilityAnalyzer:
+
+    @staticmethod
+    def stability_score(history):
+        total = len(history)
+        passed = history.count("passed")
+        return round((passed / total) * 100, 2) if total else 100
+
+
+#network_tracker
+from core.driver_factory import DriverFactory
+
+class NetworkTracker:
+
+    @staticmethod
+    def inject():
+        driver = DriverFactory.get_driver()
+        driver.execute_script("""
+            if (!window.__networkTrackerInstalled) {
+                window.__networkTrackerInstalled = true;
+                window.pendingRequests = 0;
+
+                const origFetch = window.fetch;
+                window.fetch = function() {
+                    window.pendingRequests++;
+                    return origFetch.apply(this, arguments).finally(() => {
+                        window.pendingRequests--;
+                    });
+                };
+
+                const origOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function() {
+                    this.addEventListener("readystatechange", function() {
+                        if (this.readyState === 1) window.pendingRequests++;
+                        if (this.readyState === 4) window.pendingRequests--;
+                    }, false);
+                    origOpen.apply(this, arguments);
+                };
+            }
+        """)
+
+
+#page_sync_util
+from selenium.webdriver.support.ui import WebDriverWait
+from core.driver_factory import DriverFactory
+
+class PageSyncUtil:
+
+    @staticmethod
+    def wait_for_dom_ready(timeout=15):
+        driver = DriverFactory.get_driver()
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+
+    @staticmethod
+    def wait_for_network_idle(timeout=15):
+        driver = DriverFactory.get_driver()
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return window.pendingRequests === 0")
+        )
+
+    @staticmethod
+    def wait_for_ui_stable(timeout=15):
+        PageSyncUtil.wait_for_dom_ready(timeout)
+        PageSyncUtil.wait_for_network_idle(timeout)
+
+
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+
+class FailureClassifier:
+
+    @staticmethod
+    def classify(exception):
+        if isinstance(exception, TimeoutException):
+            return "Timeout"
+        if isinstance(exception, NoSuchElementException):
+            return "LocatorIssue"
+        if isinstance(exception, StaleElementReferenceException):
+            return "DOMMutation"
+        return "Functional"
+
+
+#analytics_engine
+import json
+import os
+
+class AnalyticsEngine:
+    FILE = "reports/analytics.json"
+
+    @staticmethod
+    def load():
+        if os.path.exists(AnalyticsEngine.FILE):
+            with open(AnalyticsEngine.FILE) as f:
+                return json.load(f)
+        return {}
+
+    @staticmethod
+    def save(data):
+        os.makedirs("reports", exist_ok=True)
+        with open(AnalyticsEngine.FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    @staticmethod
+    def record(test_name, metric, value):
+        data = AnalyticsEngine.load()
+        data.setdefault(test_name, {})
+        data[test_name][metric] = value
+        AnalyticsEngine.save(data)
+
 
 
 
@@ -1095,29 +1438,57 @@ pipeline {
     agent any
 
     stages {
-        stage('Install') {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
             steps {
                 sh 'pip install -r requirements.txt'
             }
         }
 
-        stage('Test') {
+        stage('Run Tests') {
             steps {
                 sh 'pytest -n 3 --env=qa'
             }
         }
 
-        stage('Allure') {
+        stage('Generate Allure Report with History') {
             steps {
-                sh 'allure generate allure-results -o allure-report --clean'
+                sh '''
+                echo "Preserving Allure history (if exists)..."
+
+                if [ -d allure-report/history ]; then
+                    cp -r allure-report/history allure-results/ || true
+                fi
+
+                echo "Generating Allure report..."
+                allure generate allure-results -o allure-report --clean
+                '''
             }
         }
     }
 
     post {
         always {
-            archiveArtifacts artifacts: '**/screenshots/*.png'
-            archiveArtifacts artifacts: '**/logs/*.log'
+            echo "Archiving artifacts..."
+
+            archiveArtifacts artifacts: '**/screenshots/*.png', fingerprint: true
+            archiveArtifacts artifacts: '**/logs/*.log', fingerprint: true
+            archiveArtifacts artifacts: '**/reports/*.json', fingerprint: true
+            archiveArtifacts artifacts: '**/allure-report/**', fingerprint: true
+        }
+
+        success {
+            echo "Build succeeded"
+        }
+
+        failure {
+            echo "Build failed"
         }
     }
 }
@@ -1135,3 +1506,660 @@ addopts = -v -n 3 --reruns 2 --alluredir=allure-results
 python -m pytest -v
 allure generate allure-results -o allure-report --clean
 allure open allure-report
+
+
+
+from selenium.webdriver.support.ui import WebDriverWait
+
+class PageSyncUtil:
+
+    @staticmethod
+    def wait_for_dom_ready(driver, timeout=15):
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return document.readyState") == "complete"
+        )
+
+    @staticmethod
+    def wait_for_network_idle(driver, timeout=15):
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script("return window.pendingRequests === 0")
+        )
+
+    @staticmethod
+    def wait_for_ui_stable(driver, timeout=15):
+        PageSyncUtil.wait_for_dom_ready(driver, timeout)
+        PageSyncUtil.wait_for_network_idle(driver, timeout)
+
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.firefox.service import Service as FirefoxService
+from selenium.webdriver.edge.service import Service as EdgeService
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.firefox import GeckoDriverManager
+from webdriver_manager.microsoft import EdgeChromiumDriverManager
+from threading import local
+
+from utils.log_util import LogUtil
+from utils.network_tracker import NetworkTracker
+
+_driver = local()
+
+
+class DriverFactory:
+
+    @staticmethod
+    def init_driver(browser="chrome", headless=False, grid=False, grid_url=None):
+        logger = LogUtil.get_logger("DriverFactory")
+
+        LogUtil.log_json("Initializing driver", extra={
+            "browser": browser,
+            "headless": headless,
+            "grid": grid
+        })
+
+        browser = browser.lower()
+
+        try:
+            if grid:
+                if browser == "chrome":
+                    options = Options()
+                    if headless:
+                        options.add_argument("--headless=new")
+                elif browser == "firefox":
+                    options = FirefoxOptions()
+                    if headless:
+                        options.add_argument("-headless")
+                elif browser == "edge":
+                    options = EdgeOptions()
+                    if headless:
+                        options.add_argument("--headless=new")
+                else:
+                    raise Exception(f"Unsupported browser: {browser}")
+
+                _driver.instance = webdriver.Remote(
+                    command_executor=grid_url,
+                    options=options
+                )
+            else:
+                if browser == "chrome":
+                    options = Options()
+                    if headless:
+                        options.add_argument("--headless=new")
+                    service = Service(ChromeDriverManager().install())
+                    _driver.instance = webdriver.Chrome(service=service, options=options)
+
+                elif browser == "firefox":
+                    options = FirefoxOptions()
+                    if headless:
+                        options.add_argument("-headless")
+                    service = FirefoxService(GeckoDriverManager().install())
+                    _driver.instance = webdriver.Firefox(service=service, options=options)
+
+                elif browser == "edge":
+                    options = EdgeOptions()
+                    if headless:
+                        options.add_argument("--headless=new")
+                    service = EdgeService(EdgeChromiumDriverManager().install())
+                    _driver.instance = webdriver.Edge(service=service, options=options)
+
+                else:
+                    raise Exception(f"Unsupported browser: {browser}")
+
+            _driver.instance.maximize_window()
+
+            # ✅ Inject network tracker safely
+            try:
+                NetworkTracker.inject(_driver.instance)
+                logger.info("Network tracker injected successfully")
+            except Exception as e:
+                logger.warning(f"Network tracker injection failed: {e}")
+
+            logger.info("Driver initialized successfully")
+            return _driver.instance
+
+        except Exception as e:
+            logger.error(f"Driver init failed: {e}")
+            raise
+
+    @staticmethod
+    def get_driver():
+        if not hasattr(_driver, "instance"):
+            raise Exception("Driver not initialized.")
+        return _driver.instance
+
+    @staticmethod
+    def quit_driver():
+        logger = LogUtil.get_logger("DriverFactory")
+
+        if hasattr(_driver, "instance"):
+            try:
+                _driver.instance.quit()
+                logger.info("Driver quit successfully")
+            except Exception as e:
+                logger.error(f"Driver quit failed: {e}")
+            finally:
+                del _driver.instance
+
+
+
+import allure
+from collections import defaultdict
+
+class RetryEngine:
+    MAX_RETRIES = 2
+    attempts = defaultdict(int)
+
+    @staticmethod
+    def record_attempt(test_name):
+        RetryEngine.attempts[test_name] += 1
+        return RetryEngine.attempts[test_name]
+
+    @staticmethod
+    def should_retry(test_name):
+        return RetryEngine.attempts[test_name] <= RetryEngine.MAX_RETRIES
+
+    @staticmethod
+    def attach_retry_info(test_name, exception):
+        allure.attach(
+            str(exception),
+            name=f"Retry attempt {RetryEngine.attempts[test_name]}",
+            attachment_type=allure.attachment_type.TEXT
+        )
+
+
+import json
+import os
+
+class FlakyTracker:
+    FILE = "reports/flaky_history.json"
+
+    @staticmethod
+    def load():
+        if os.path.exists(FlakyTracker.FILE):
+            with open(FlakyTracker.FILE, "r") as f:
+                return json.load(f)
+        return {}
+
+    @staticmethod
+    def save(data):
+        os.makedirs("reports", exist_ok=True)
+        with open(FlakyTracker.FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    @staticmethod
+    def record(test_name, status):
+        data = FlakyTracker.load()
+        data.setdefault(test_name, []).append(status)
+        FlakyTracker.save(data)
+
+    @staticmethod
+    def is_flaky(history):
+        return "passed" in history and "failed" in history
+
+
+class StabilityAnalyzer:
+
+    @staticmethod
+    def stability_score(history):
+        total = len(history)
+        passed = history.count("passed")
+        return round((passed / total) * 100, 2) if total else 100
+
+
+
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    WebDriverException
+)
+
+class FailureClassifier:
+
+    @staticmethod
+    def classify(exception):
+        if isinstance(exception, TimeoutException):
+            return "Timeout"
+        if isinstance(exception, NoSuchElementException):
+            return "LocatorIssue"
+        if isinstance(exception, StaleElementReferenceException):
+            return "DOMMutation"
+        if isinstance(exception, WebDriverException):
+            return "WebDriver"
+        return "Functional"
+
+
+
+import json
+import os
+
+class AnalyticsEngine:
+    FILE = "reports/analytics.json"
+
+    @staticmethod
+    def load():
+        if os.path.exists(AnalyticsEngine.FILE):
+            with open(AnalyticsEngine.FILE, "r") as f:
+                return json.load(f)
+        return {}
+
+    @staticmethod
+    def save(data):
+        os.makedirs("reports", exist_ok=True)
+        with open(AnalyticsEngine.FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+    @staticmethod
+    def record(test_name, metric, value):
+        data = AnalyticsEngine.load()
+        data.setdefault(test_name, {})
+        data[test_name][metric] = value
+        AnalyticsEngine.save(data)
+
+
+class NetworkTracker:
+
+    @staticmethod
+    def inject(driver):
+        driver.execute_script("""
+            if (!window.__networkTrackerInstalled) {
+                window.__networkTrackerInstalled = true;
+                window.pendingRequests = 0;
+
+                const origFetch = window.fetch;
+                window.fetch = function() {
+                    window.pendingRequests++;
+                    return origFetch.apply(this, arguments).finally(() => {
+                        window.pendingRequests--;
+                    });
+                };
+
+                const origOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function() {
+                    this.addEventListener("readystatechange", function() {
+                        if (this.readyState === 1) window.pendingRequests++;
+                        if (this.readyState === 4) window.pendingRequests--;
+                    }, false);
+                    origOpen.apply(this, arguments);
+                };
+            }
+        """)
+
+
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
+from core.driver_factory import DriverFactory
+from core.framework_constants import EXPLICIT_WAIT
+from utils.log_util import LogUtil
+from utils.page_sync_util import PageSyncUtil
+
+
+class SeleniumUtil:
+
+    @staticmethod
+    def click(element):
+        logger = LogUtil.get_logger("SeleniumUtil")
+        logger.info("Clicking element")
+
+        driver = DriverFactory.get_driver()
+
+        WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.element_to_be_clickable(element)
+        )
+
+        element.click()
+        PageSyncUtil.wait_for_ui_stable(driver)
+
+    @staticmethod
+    def type(element, text):
+        logger = LogUtil.get_logger("SeleniumUtil")
+        logger.info("Typing into element")
+
+        driver = DriverFactory.get_driver()
+
+        WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.visibility_of(element)
+        )
+
+        element.clear()
+        element.send_keys(text)
+
+        PageSyncUtil.wait_for_ui_stable(driver)
+
+    @staticmethod
+    def get_text(element):
+        driver = DriverFactory.get_driver()
+
+        text = WebDriverWait(driver, EXPLICIT_WAIT).until(
+            EC.visibility_of(element)
+        ).text
+
+        PageSyncUtil.wait_for_ui_stable(driver)
+        return text
+
+
+import pytest
+import subprocess
+import os
+import json
+import allure
+
+from core.driver_factory import DriverFactory
+from utils.config_reader import ConfigReader
+from utils.cleanup_util import CleanupUtil
+from utils.email_util import EmailUtil
+from utils.slack_util import SlackUtil
+from utils.screenshot_util import ScreenshotUtil
+from utils.page_source_util import PageSourceUtil
+from utils.browser_log_util import BrowserLogUtil
+from utils.log_util import LogUtil
+from utils.page_sync_util import PageSyncUtil
+
+from utils.retry_engine import RetryEngine
+from utils.flaky_tracker import FlakyTracker
+from utils.stability_analyzer import StabilityAnalyzer
+from utils.failure_classifier import FailureClassifier
+from utils.analytics_engine import AnalyticsEngine
+
+
+# ----------------------------
+# CLI OPTIONS
+# ----------------------------
+def pytest_addoption(parser):
+    parser.addoption("--env", action="store", default="qa")
+    parser.addoption("--browser", action="store", default="chrome")
+
+
+@pytest.fixture(scope="session")
+def env(request):
+    return request.config.getoption("--env")
+
+
+@pytest.fixture(scope="session")
+def browser(request):
+    return request.config.getoption("--browser")
+
+
+# ----------------------------
+# CLEANUP BEFORE SESSION
+# ----------------------------
+def pytest_sessionstart(session):
+    print("🧹 Cleaning old artifacts...")
+    CleanupUtil.clean_all()
+
+
+# ----------------------------
+# TEST CONTEXT + LOGGER
+# ----------------------------
+@pytest.fixture(autouse=True)
+def test_context(request, env, browser):
+    test_name = request.node.name
+    cid = LogUtil.set_context(test_name, env, browser)
+
+    logger = LogUtil.get_logger(test_name)
+    logger.info(f"🚀 Test started | CID={cid}")
+    LogUtil.log_json("Test started")
+
+    yield
+
+    logger.info(f"🏁 Test finished | CID={cid}")
+    LogUtil.log_json("Test finished")
+
+
+# ----------------------------
+# DRIVER SETUP / TEARDOWN
+# ----------------------------
+@pytest.fixture(scope="function", autouse=True)
+def setup(request, browser):
+    env_name = request.config.getoption("--env")
+    config = ConfigReader.load(env_name)
+
+    driver = DriverFactory.init_driver(
+        browser=browser,
+        headless=config["HEADLESS"],
+        grid=config["GRID"],
+        grid_url=config["GRID_URL"]
+    )
+
+    driver.get(config["URL"])
+    PageSyncUtil.wait_for_ui_stable(driver)
+
+    yield
+
+    DriverFactory.quit_driver()
+
+
+# ----------------------------
+# SMART RETRY ENGINE
+# ----------------------------
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    test_name = item.name
+
+    while True:
+        try:
+            RetryEngine.record_attempt(test_name)
+            yield
+            return
+        except Exception as e:
+            if RetryEngine.should_retry(test_name):
+                RetryEngine.attach_retry_info(test_name, e)
+                AnalyticsEngine.record(test_name, "retries", RetryEngine.attempts[test_name])
+                continue
+            else:
+                raise
+
+
+# ----------------------------
+# FAILURE + FLAKY + ANALYTICS
+# ----------------------------
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+
+    if rep.when == "call":
+        status = "failed" if rep.failed else "passed"
+        FlakyTracker.record(item.name, status)
+
+        history = FlakyTracker.load().get(item.name, [])
+        stability = StabilityAnalyzer.stability_score(history)
+
+        AnalyticsEngine.record(item.name, "stability", stability)
+        allure.dynamic.label("stability", f"{stability}%")
+
+        if FlakyTracker.is_flaky(history):
+            allure.dynamic.label("flaky", "true")
+            allure.attach(
+                f"Stability Score: {stability}%",
+                name="Flakiness Analysis",
+                attachment_type=allure.attachment_type.TEXT
+            )
+
+    if rep.when == "call" and rep.failed:
+        exc = call.excinfo.value if call.excinfo else None
+        if exc:
+            category = FailureClassifier.classify(exc)
+            allure.dynamic.label("failure_type", category)
+            AnalyticsEngine.record(item.name, "failure_type", category)
+
+        try:
+            ScreenshotUtil.attach_to_allure()
+            PageSourceUtil.attach_to_allure()
+            BrowserLogUtil.attach_console_logs()
+
+            if os.path.exists("logs/structured.json"):
+                with open("logs/structured.json", "r", encoding="utf-8") as f:
+                    allure.attach(
+                        f.read(),
+                        name="Structured Logs",
+                        attachment_type=allure.attachment_type.JSON
+                    )
+
+            context = LogUtil.get_context()
+            allure.attach(
+                json.dumps(context, indent=2),
+                name="Test Context",
+                attachment_type=allure.attachment_type.JSON
+            )
+
+            print("📎 Failure artifacts attached")
+
+        except Exception as e:
+            print("❌ Failure hook error:", e)
+
+
+# ----------------------------
+# SESSION FINISH
+# ----------------------------
+def pytest_sessionfinish(session, exitstatus):
+    print("📢 Pytest session finished")
+
+    env = session.config.getoption("--env")
+    config = ConfigReader.load(env)
+
+    # ---------------------------
+    # Generate Allure Report (Windows-safe)
+    # ---------------------------
+    try:
+        subprocess.run(
+            "allure generate allure-results -o allure-report --clean",
+            check=True,
+            shell=True
+        )
+        print("✅ Allure report generated")
+    except Exception as e:
+        print("❌ Allure generation failed:", e)
+
+    # ---------------------------
+    # Email Notification (Optional)
+    # ---------------------------
+    try:
+        if "EMAIL" in config and config["EMAIL"].get("FROM") and config["EMAIL"].get("PASSWORD"):
+            EmailUtil.send_email(
+                subject="Automation Execution Completed",
+                body="<h2>Execution Finished</h2>",
+                sender=config["EMAIL"]["FROM"],
+                password=config["EMAIL"]["PASSWORD"],
+                recipients=config["EMAIL"]["TO"],
+                attachments=["allure-report/index.html"]
+            )
+            print("📧 Email sent")
+        else:
+            print("ℹ️ Email skipped (not configured)")
+    except Exception as e:
+        print("❌ Email failed:", e)
+
+    # ---------------------------
+    # Slack Notification (Optional)
+    # ---------------------------
+    try:
+        webhook = "YOUR_WEBHOOK_URL"
+        if webhook.startswith("http"):
+            SlackUtil.send_message(
+                webhook_url=webhook,
+                message="🚀 Automation completed. Allure report ready."
+            )
+            print("💬 Slack notified")
+        else:
+            print("ℹ️ Slack skipped (not configured)")
+    except Exception as e:
+        print("❌ Slack failed:", e)
+
+
+
+import logging
+import json
+import os
+import uuid
+from threading import local
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+
+_thread_ctx = local()
+
+
+class MaskingFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        for secret in ["password", "pwd", "secret", "token"]:
+            msg = msg.replace(secret, "****")
+        record.msg = msg
+        return True
+
+
+class LogUtil:
+
+    @staticmethod
+    def set_context(test_name, env, browser):
+        correlation_id = str(uuid.uuid4())[:8]
+        _thread_ctx.correlation_id = correlation_id
+        _thread_ctx.test_name = test_name
+        _thread_ctx.env = env
+        _thread_ctx.browser = browser
+
+        _thread_ctx.log_file = f"logs/test_{correlation_id}.log"
+        return correlation_id
+
+    @staticmethod
+    def get_context():
+        return {
+            "correlation_id": getattr(_thread_ctx, "correlation_id", "N/A"),
+            "test_name": getattr(_thread_ctx, "test_name", "N/A"),
+            "env": getattr(_thread_ctx, "env", "N/A"),
+            "browser": getattr(_thread_ctx, "browser", "N/A")
+        }
+
+    @staticmethod
+    def get_logger(name):
+        os.makedirs("logs", exist_ok=True)
+
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.INFO)
+
+        if not logger.handlers:
+            formatter = logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+            )
+
+            combined = RotatingFileHandler(
+                "logs/automation.log", maxBytes=5_000_000, backupCount=5
+            )
+            combined.setFormatter(formatter)
+            combined.addFilter(MaskingFilter())
+
+            per_test_file = getattr(_thread_ctx, "log_file", "logs/default.log")
+            per_test = logging.FileHandler(per_test_file)
+            per_test.setFormatter(formatter)
+            per_test.addFilter(MaskingFilter())
+
+            console = logging.StreamHandler()
+            console.setFormatter(formatter)
+
+            logger.addHandler(combined)
+            logger.addHandler(per_test)
+            logger.addHandler(console)
+
+        return logger
+
+    @staticmethod
+    def log_json(message, level="INFO", extra=None):
+        os.makedirs("logs", exist_ok=True)
+
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "message": message,
+            **LogUtil.get_context()
+        }
+
+        if extra:
+            payload.update(extra)
+
+        with open("logs/structured.json", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
