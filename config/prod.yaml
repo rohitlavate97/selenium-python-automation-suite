@@ -1,0 +1,6 @@
+URL: "https://online.actitime.com/mstar/login.do"
+BROWSER: "edge"
+GRID: true
+GRID_URL: "http://localhost:4444/wd/hub"
+HEADLESS: true
+IMPLICIT_TIMEOUT: 10

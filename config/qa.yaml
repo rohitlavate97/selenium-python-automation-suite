@@ -1,0 +1,13 @@
+URL: "https://online.actitime.com/mstar/login.do"
+BROWSER: "chrome"
+GRID: false
+GRID_URL: "http://localhost:4444/wd/hub"
+HEADLESS: false
+IMPLICIT_TIMEOUT: 10
+
+EMAIL:
+  FROM: "your@gmail.com"
+  PASSWORD: "app-password"
+  TO: ["a@gmail.com", "b@gmail.com"]
+  SMTP_HOST: "smtp.gmail.com"
+  SMTP_PORT: 587
