@@ -1,5 +1,7 @@
 import pytest
 import subprocess
+import os
+import allure
 
 from core.driver_factory import DriverFactory
 from utils.config_reader import ConfigReader
@@ -9,29 +11,17 @@ from utils.slack_util import SlackUtil
 from utils.screenshot_util import ScreenshotUtil
 from utils.page_source_util import PageSourceUtil
 from utils.browser_log_util import BrowserLogUtil
+from utils.log_util import LogUtil
 
 
 # ----------------------------
 # CLI OPTIONS
 # ----------------------------
 def pytest_addoption(parser):
-    parser.addoption(
-        "--env",
-        action="store",
-        default="qa",
-        help="Environment name (qa / uat / prod)"
-    )
-    parser.addoption(
-        "--browser",
-        action="store",
-        default="chrome",
-        help="Browser name (chrome / firefox / edge)"
-    )
+    parser.addoption("--env", action="store", default="qa")
+    parser.addoption("--browser", action="store", default="chrome")
 
 
-# ----------------------------
-# FIXTURES FOR CLI OPTIONS
-# ----------------------------
 @pytest.fixture(scope="session")
 def env(request):
     return request.config.getoption("--env")
@@ -43,26 +33,36 @@ def browser(request):
 
 
 # ----------------------------
-# CLEANUP BEFORE TESTS START
+# CLEANUP
 # ----------------------------
 def pytest_sessionstart(session):
-    print("📢 Pytest session started")
-    print("🧹 Cleaning old artifacts before test run...")
+    print("🧹 Cleaning old artifacts...")
     CleanupUtil.clean_all()
 
 
 # ----------------------------
-# WEBDRIVER SETUP / TEARDOWN
+# TEST CONTEXT + LOGGER
+# ----------------------------
+@pytest.fixture(autouse=True)
+def test_context(request, env, browser):
+    test_name = request.node.name
+    cid = LogUtil.set_context(test_name, env, browser)
+
+    logger = LogUtil.get_logger(test_name)
+    logger.info(f"🚀 Test started | CID={cid}")
+    LogUtil.log_json("Test started")
+
+    yield
+
+    logger.info(f"🏁 Test finished | CID={cid}")
+    LogUtil.log_json("Test finished")
+
+
+# ----------------------------
+# DRIVER SETUP
 # ----------------------------
 @pytest.fixture(scope="function", autouse=True)
 def setup(request, browser):
-    """
-    This fixture:
-    1. Runs BEFORE every test
-    2. Loads env config
-    3. Opens the application
-    4. Quits WebDriver AFTER test
-    """
     env_name = request.config.getoption("--env")
     config = ConfigReader.load(env_name)
 
@@ -79,7 +79,7 @@ def setup(request, browser):
 
 
 # ----------------------------
-# AUTO CAPTURE ON FAILURE
+# FAILURE HOOK
 # ----------------------------
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
@@ -91,60 +91,54 @@ def pytest_runtest_makereport(item, call):
             ScreenshotUtil.attach_to_allure()
             PageSourceUtil.attach_to_allure()
             BrowserLogUtil.attach_console_logs()
-            print("📸 Screenshot + 🧾 Page Source + 🧠 Console Logs attached")
+
+            if os.path.exists("logs/structured.json"):
+                with open("logs/structured.json", "r") as f:
+                    allure.attach(
+                        f.read(),
+                        name="Structured Logs",
+                        attachment_type=allure.attachment_type.JSON
+                    )
+
+            print("📎 Failure artifacts attached")
         except Exception as e:
-            print("❌ Failure capture error:", e)
+            print("❌ Failure hook error:", e)
 
 
 # ----------------------------
-# AFTER ALL TESTS FINISH
+# SESSION FINISH
 # ----------------------------
 def pytest_sessionfinish(session, exitstatus):
-    print("📢 Pytest session finished")
-
-    # Load config
     config = ConfigReader.load("qa")
 
-    # ---------------------------
-    # Generate Allure HTML Report
-    # ---------------------------
     try:
         subprocess.run(
             ["allure", "generate", "allure-results", "-o", "allure-report", "--clean"],
             check=True,
             shell=True
         )
-        print("✅ Allure HTML report generated successfully.")
+        print("✅ Allure report generated")
     except Exception as e:
-        print("❌ Failed to generate Allure report:", e)
+        print("❌ Allure failed:", e)
 
-    # ---------------------------
-    # Email Notification
-    # ---------------------------
     try:
-        subject = "Automation Execution Completed"
-        body = "<h2>Test Execution Finished</h2>"
-
         EmailUtil.send_email(
-            subject=subject,
-            body=body,
+            subject="Automation Execution Completed",
+            body="<h2>Execution Finished</h2>",
             sender=config["EMAIL"]["FROM"],
             password=config["EMAIL"]["PASSWORD"],
             recipients=config["EMAIL"]["TO"],
             attachments=["allure-report/index.html"]
         )
-        print("📧 Email sent successfully")
+        print("📧 Email sent")
     except Exception as e:
-        print("❌ Email sending failed:", e)
+        print("❌ Email failed:", e)
 
-    # ---------------------------
-    # Slack Notification
-    # ---------------------------
     try:
         SlackUtil.send_message(
             webhook_url="YOUR_WEBHOOK_URL",
-            message="🚀 Automation Execution Completed. Allure report generated!"
+            message="🚀 Automation completed. Allure report ready."
         )
-        print("💬 Slack message sent")
+        print("💬 Slack notified")
     except Exception as e:
-        print("❌ Slack notification failed:", e)
+        print("❌ Slack failed:", e)

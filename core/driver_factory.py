@@ -8,8 +8,8 @@ from selenium.webdriver.edge.service import Service as EdgeService
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.firefox import GeckoDriverManager
 from webdriver_manager.microsoft import EdgeChromiumDriverManager
-from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from threading import local
+from utils.log_util import LogUtil
 
 _driver = local()
 
@@ -17,98 +17,88 @@ _driver = local()
 class DriverFactory:
 
     @staticmethod
-    def init_driver(
-            browser="chrome",
-            headless=False,
-            grid=False,
-            grid_url=None
-    ):
+    def init_driver(browser="chrome", headless=False, grid=False, grid_url=None):
+        logger = LogUtil.get_logger("DriverFactory")
+        LogUtil.log_json("Initializing driver", extra={
+            "browser": browser,
+            "headless": headless,
+            "grid": grid
+        })
+
         browser = browser.lower()
 
-        if grid:
-            if browser == "chrome":
-                options = Options()
-                if headless:
-                    options.add_argument("--headless=new")
+        try:
+            if grid:
+                if browser == "chrome":
+                    options = Options()
+                    if headless:
+                        options.add_argument("--headless=new")
+                elif browser == "edge":
+                    options = EdgeOptions()
+                    if headless:
+                        options.add_argument("--headless=new")
+                elif browser == "firefox":
+                    options = FirefoxOptions()
+                    if headless:
+                        options.add_argument("-headless")
+                else:
+                    raise Exception(f"Unsupported browser: {browser}")
 
-                options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
-
-            elif browser == "edge":
-                options = EdgeOptions()
-                if headless:
-                    options.add_argument("--headless=new")
-
-                options.set_capability("ms:loggingPrefs", {"browser": "ALL"})
-
-            elif browser == "firefox":
-                options = FirefoxOptions()
-                if headless:
-                    options.add_argument("-headless")
-
+                _driver.instance = webdriver.Remote(
+                    command_executor=grid_url,
+                    options=options
+                )
             else:
-                raise Exception(f"Unsupported browser: {browser}")
+                if browser == "chrome":
+                    options = Options()
+                    if headless:
+                        options.add_argument("--headless=new")
+                    service = Service(ChromeDriverManager().install())
+                    _driver.instance = webdriver.Chrome(service=service, options=options)
 
-            _driver.instance = webdriver.Remote(
-                command_executor=grid_url,
-                options=options
-            )
+                elif browser == "firefox":
+                    options = FirefoxOptions()
+                    if headless:
+                        options.add_argument("-headless")
+                    service = FirefoxService(GeckoDriverManager().install())
+                    _driver.instance = webdriver.Firefox(service=service, options=options)
 
-        else:
-            if browser == "chrome":
-                options = Options()
-                if headless:
-                    options.add_argument("--headless=new")
+                elif browser == "edge":
+                    options = EdgeOptions()
+                    if headless:
+                        options.add_argument("--headless=new")
+                    service = EdgeService(EdgeChromiumDriverManager().install())
+                    _driver.instance = webdriver.Edge(service=service, options=options)
 
-                options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+                else:
+                    raise Exception(f"Unsupported browser: {browser}")
 
-                service = Service(ChromeDriverManager().install())
-                _driver.instance = webdriver.Chrome(
-                    service=service,
-                    options=options
-                )
+            _driver.instance.maximize_window()
+            logger.info("Driver initialized successfully")
+            LogUtil.log_json("Driver initialized successfully")
+            return _driver.instance
 
-            elif browser == "firefox":
-                options = FirefoxOptions()
-                if headless:
-                    options.add_argument("-headless")
-
-                service = FirefoxService(GeckoDriverManager().install())
-                _driver.instance = webdriver.Firefox(
-                    service=service,
-                    options=options
-                )
-
-            elif browser == "edge":
-                options = EdgeOptions()
-                if headless:
-                    options.add_argument("--headless=new")
-
-                options.set_capability("ms:loggingPrefs", {"browser": "ALL"})
-
-                service = EdgeService(EdgeChromiumDriverManager().install())
-                _driver.instance = webdriver.Edge(
-                    service=service,
-                    options=options
-                )
-
-            else:
-                raise Exception(f"Unsupported browser: {browser}")
-
-        _driver.instance.maximize_window()
-        return _driver.instance
+        except Exception as e:
+            logger.error(f"Driver init failed: {e}")
+            LogUtil.log_json("Driver init failed", level="ERROR", extra={"error": str(e)})
+            raise
 
     @staticmethod
     def get_driver():
         if not hasattr(_driver, "instance"):
-            raise Exception("Driver not initialized. Call init_driver() first.")
+            raise Exception("Driver not initialized.")
         return _driver.instance
 
     @staticmethod
     def quit_driver():
+        logger = LogUtil.get_logger("DriverFactory")
         if hasattr(_driver, "instance"):
             try:
                 _driver.instance.quit()
-            except Exception:
-                pass
+                logger.info("Driver quit successfully")
+                LogUtil.log_json("Driver quit successfully")
+            except Exception as e:
+                logger.error(f"Driver quit failed: {e}")
+                LogUtil.log_json("Driver quit failed", level="ERROR", extra={"error": str(e)})
             finally:
                 del _driver.instance
